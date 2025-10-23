@@ -1,0 +1,6 @@
+# Placeholder for data exports
+# CSV and JSON exports will be saved here
+
+*.csv
+*.json
+*.xlsx

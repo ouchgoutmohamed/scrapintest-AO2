@@ -1,0 +1,37 @@
+{
+  "dashboard": {
+    "title": "PMMP Scraper Dashboard",
+    "panels": [
+      {
+        "title": "Items Scraped Total",
+        "targets": [
+          {
+            "expr": "sum(pmpm_items_scraped_total)",
+            "legendFormat": "Total Items"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "Error Rate",
+        "targets": [
+          {
+            "expr": "rate(pmmp_spider_errors_total[5m])",
+            "legendFormat": "Errors/sec"
+          }
+        ],
+        "type": "graph"
+      },
+      {
+        "title": "Active Spiders",
+        "targets": [
+          {
+            "expr": "pmmp_active_spiders",
+            "legendFormat": "Active"
+          }
+        ],
+        "type": "stat"
+      }
+    ]
+  }
+}

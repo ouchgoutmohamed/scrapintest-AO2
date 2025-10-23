@@ -1,0 +1,4 @@
+# Placeholder for archived HTML pages
+# Pages will be saved with format: {ref}_{timestamp}_{hash}.html
+
+*.html

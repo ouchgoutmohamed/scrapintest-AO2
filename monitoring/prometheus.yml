@@ -1,0 +1,48 @@
+# Configuration Prometheus
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+
+# Alertmanager configuration (optionnel)
+# alerting:
+#   alertmanagers:
+#     - static_configs:
+#         - targets:
+#           - alertmanager:9093
+
+# Règles d'alerte
+rule_files:
+  - "alerts.yml"
+
+# Scrape configurations
+scrape_configs:
+  # Scraper PMMP (métriques Scrapy)
+  - job_name: 'pmmp_scraper'
+    static_configs:
+      - targets: ['scraper:9100']
+        labels:
+          service: 'scraper'
+          environment: 'production'
+
+  # API FastAPI
+  - job_name: 'pmmp_api'
+    static_configs:
+      - targets: ['api:8000']
+        labels:
+          service: 'api'
+          environment: 'production'
+
+  # PostgreSQL Exporter (optionnel)
+  # - job_name: 'postgres'
+  #   static_configs:
+  #     - targets: ['postgres-exporter:9187']
+
+  # Node Exporter (métriques système)
+  # - job_name: 'node'
+  #   static_configs:
+  #     - targets: ['node-exporter:9100']
+
+  # Prometheus lui-même
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']

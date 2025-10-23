@@ -1,0 +1,80 @@
+# Règles d'alerte Prometheus pour le système PMMP
+groups:
+  - name: pmmp_alerts
+    interval: 1m
+    rules:
+      # Alerte: Aucune consultation extraite pendant 3 jours
+      - alert: NoConsultationsExtracted
+        expr: increase(pmmp_items_scraped_total{type="ConsultationItem"}[3d]) == 0
+        for: 1h
+        labels:
+          severity: warning
+          service: scraper
+        annotations:
+          summary: "Aucune consultation extraite depuis 3 jours"
+          description: "Le scraper n'a extrait aucune consultation pendant 3 jours. Vérifier l'état du site ou la configuration."
+
+      # Alerte: Taux d'erreur élevé
+      - alert: HighErrorRate
+        expr: rate(pmmp_spider_errors_total[10m]) > 0.1
+        for: 15m
+        labels:
+          severity: critical
+          service: scraper
+        annotations:
+          summary: "Taux d'erreur élevé dans le scraper"
+          description: "Plus de 10% des requêtes échouent. Valeur actuelle: {{ $value }}"
+
+      # Alerte: API indisponible
+      - alert: APIDown
+        expr: up{job="pmmp_api"} == 0
+        for: 5m
+        labels:
+          severity: critical
+          service: api
+        annotations:
+          summary: "API PMMP indisponible"
+          description: "L'API ne répond plus depuis 5 minutes."
+
+      # Alerte: Spider bloqué
+      - alert: SpiderStuck
+        expr: changes(pmmp_pages_scraped_total[30m]) == 0 and pmmp_active_spiders > 0
+        for: 30m
+        labels:
+          severity: warning
+          service: scraper
+        annotations:
+          summary: "Spider potentiellement bloqué"
+          description: "Aucune nouvelle page scrapée depuis 30 minutes alors qu'un spider est actif."
+
+      # Alerte: Blocage HTTP (429)
+      - alert: RateLimitExceeded
+        expr: increase(pmmp_responses_total{status="429"}[10m]) > 5
+        for: 5m
+        labels:
+          severity: warning
+          service: scraper
+        annotations:
+          summary: "Rate limit atteint"
+          description: "Le serveur retourne des erreurs 429 (Too Many Requests). Augmenter les délais."
+
+      # Alerte: Base de données inaccessible
+      - alert: DatabaseConnectionFailed
+        expr: up{job="postgres"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          service: database
+        annotations:
+          summary: "Base de données PostgreSQL inaccessible"
+          description: "Impossible de se connecter à PostgreSQL."
+
+      # Alerte: Espace disque faible (si node-exporter activé)
+      # - alert: LowDiskSpace
+      #   expr: (node_filesystem_avail_bytes / node_filesystem_size_bytes) < 0.1
+      #   for: 10m
+      #   labels:
+      #     severity: warning
+      #   annotations:
+      #     summary: "Espace disque faible"
+      #     description: "Moins de 10% d'espace disponible sur {{ $labels.mountpoint }}"
