@@ -124,7 +124,118 @@ def find_next_page_url(list_html: str, base_url: str) -> Optional[str]:
 		txt = (a.get_text(" ", strip=True) or "").lower()
 		if "suivant" in txt or "next" in txt:
 			return urljoin(base_url, a["href"])
+		# Href avec currentPage
+		href = a.get("href") or ""
+		if "currentPage=" in href:
+			return urljoin(base_url, href)
 	return None
+
+
+def try_set_page_size_500(client: httpx.AsyncClient, list_html: str, list_action_url: str) -> Optional[str]:
+	"""
+	Si la page de résultats contient un <select> de taille de page, tenter de le fixer à 500 en POSTant le formulaire.
+	Retourne le nouvel HTML si succès, sinon None.
+	"""
+	soup = BeautifulSoup(list_html, "lxml")
+	form = soup.find("form")
+	if not form:
+		return None
+	# Chercher un select de taille de page
+	page_size_select = None
+	for sel in form.find_all("select"):
+		name = sel.get("name", "")
+		id_ = sel.get("id", "")
+		if "listePageSize" in name or "listePageSize" in id_ or "PageSize" in name:
+			page_size_select = sel
+			break
+	if not page_size_select:
+		return None
+	current_val = page_size_select.get("value") or (page_size_select.find("option", selected=True).get("value") if page_size_select.find("option", selected=True) else None)
+	# Si déjà 500, ne rien faire
+	if current_val == "500":
+		return None
+	# Construire payload depuis tous les inputs/selects présents
+	payload: Dict[str, str] = {}
+	for inp in form.find_all(["input", "select", "textarea"]):
+		name = inp.get("name")
+		if not name:
+			continue
+		if inp.name == "select":
+			val = inp.get("value")
+			if not val:
+				opt = inp.find("option", selected=True) or inp.find("option")
+				val = opt.get("value") if opt else ""
+		elif inp.name == "textarea":
+			val = inp.text or ""
+		else:
+			input_type = (inp.get("type") or "").lower()
+			if input_type in ("checkbox", "radio"):
+				if inp.has_attr("checked"):
+					val = inp.get("value", "on")
+				else:
+					continue
+			else:
+				val = inp.get("value", "")
+		payload[name] = val
+	# Forcer la taille de page à 500
+	payload[page_size_select.get("name")] = "500"
+	action = form.get("action") or list_action_url
+	try:
+		# Respecter un petit délai
+		# Nous réutilisons polite_post via client.post directement ici pour réduire un hop
+		# mais gardons les en-têtes semblables
+		resp = client.post(action, data=payload)
+		# httpx AsyncClient requires await; nous sommes dans une fonction sync util: appelons via .post de l'AsyncClient n'est pas possible
+	except Exception:
+		return None
+	return None  # Cette voie sync n'est pas utilisable avec AsyncClient; traitée dans la version async ci-dessous
+
+
+async def ensure_page_size_500(client: httpx.AsyncClient, list_html: str, list_action_url: str) -> str:
+	"""Version asynchrone: si possible, renvoyer la page avec taille=500, sinon l'HTML original."""
+	soup = BeautifulSoup(list_html, "lxml")
+	form = soup.find("form")
+	if not form:
+		return list_html
+	page_size_select = None
+	for sel in form.find_all("select"):
+		name = sel.get("name", "")
+		id_ = sel.get("id", "")
+		if "listePageSize" in name or "listePageSize" in id_ or "PageSize" in name:
+			page_size_select = sel
+			break
+	if not page_size_select:
+		return list_html
+	selected_opt = page_size_select.find("option", selected=True)
+	current_val = page_size_select.get("value") or (selected_opt.get("value") if selected_opt else None)
+	if current_val == "500":
+		return list_html
+	# Construire payload depuis tous les inputs/selects présents
+	payload: Dict[str, str] = {}
+	for inp in form.find_all(["input", "select", "textarea"]):
+		name = inp.get("name")
+		if not name:
+			continue
+		if inp.name == "select":
+			sel_opt = inp.find("option", selected=True) or inp.find("option")
+			val = sel_opt.get("value") if sel_opt else inp.get("value", "")
+		elif inp.name == "textarea":
+			val = inp.text or ""
+		else:
+			input_type = (inp.get("type") or "").lower()
+			if input_type in ("checkbox", "radio") and not inp.has_attr("checked"):
+				continue
+			val = inp.get("value", "")
+		payload[name] = val
+	payload[page_size_select.get("name")] = "500"
+	action = form.get("action") or list_action_url
+	if action.startswith("/mobile/"):
+		action = action.replace("/mobile/", "/")
+	try:
+		new_resp = await polite_post(client, action, data=payload, headers={"Referer": urljoin(BASE_URL, action)})
+		return new_resp.text
+	except Exception:
+		return list_html
 
 
 def text_or_none(scope_soup: BeautifulSoup, css_selector: str) -> Optional[str]:
@@ -338,7 +449,10 @@ async def run_scraper(date_start: str = "27/04/2025", date_end: Optional[str] = 
 		except Exception:
 			pass
 
-		# 6. Extraire tous les liens détail consultation à partir des <a><img></a>
+		# 6. Fixer la taille de page à 500 si le select est présent
+		list_html = await ensure_page_size_500(client, list_html, action)
+
+		# Extraire tous les liens détail consultation à partir des <a><img></a>
 		# et gérer la pagination. Si aucune entrée, fallback vers 'En cours'.
 		page_html = list_html
 		first_links = parse_consultation_links(page_html, BASE_URL)
@@ -346,7 +460,7 @@ async def run_scraper(date_start: str = "27/04/2025", date_end: Optional[str] = 
 			fallback_path = "/index.php?page=entreprise.EntrepriseAdvancedSearch&AllCons&EnCours&searchAnnCons&mobile=out"
 			print("[INFO] Aucun lien après POST. Fallback vers la liste 'En cours'...")
 			fb_resp = await polite_get(client, fallback_path)
-			page_html = fb_resp.text
+			page_html = await ensure_page_size_500(client, fb_resp.text, fallback_path)
 			try:
 				logs = Path("logs"); logs.mkdir(exist_ok=True)
 				(logs / "consultations_list_fallback.html").write_text(page_html, encoding="utf-8")
@@ -453,19 +567,22 @@ def _parse_cli_args() -> Tuple[Optional[str], Optional[str], Optional[int]]:
 
 
 async def run_year(year: int, overwrite: bool = False) -> None:
-	"""Scrape l'année complète en mois consécutifs sans doublons."""
-	from calendar import monthrange
+	"""Scrape l'année complète jour par jour (plus fin pour limiter la pagination), sans doublons."""
+	from datetime import date, timedelta
 	# Préparer sortie une fois
 	if overwrite and OUTPUT_FILE.exists():
 		OUTPUT_FILE.unlink()
 	if not OUTPUT_FILE.exists():
 		OUTPUT_FILE.touch()
-	for month in range(1, 13):
-		days = monthrange(year, month)[1]
-		ds = f"01/{month:02d}/{year}"
-		de = f"{days:02d}/{month:02d}/{year}"
-		print(f"\n[MONTH] {ds} -> {de}")
+	start = date(year, 1, 1)
+	end = date(year, 12, 31)
+	cur = start
+	while cur <= end:
+		ds = cur.strftime("%d/%m/%Y")
+		de = ds
+		print(f"\n[DAY] {ds}")
 		await run_scraper(ds, de, clear_output=False)
+		cur += timedelta(days=1)
 
 
 if __name__ == "__main__":
