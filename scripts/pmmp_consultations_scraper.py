@@ -232,10 +232,34 @@ def append_jsonl(path: Path, record: dict) -> None:
 		f.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def load_existing_ids(path: Path) -> Set[str]:
+	"""Charge les IDs déjà présents dans le JSONL pour éviter les doublons inter-runs."""
+	ids: Set[str] = set()
+	if not path.exists():
+		return ids
+	try:
+		with path.open("r", encoding="utf-8") as f:
+			for line in f:
+				line = line.strip()
+				if not line:
+					continue
+				try:
+					obj = json.loads(line)
+					_id = obj.get("id")
+					if _id:
+						ids.add(_id)
+				except Exception:
+					# ignorer lignes corrompues
+					continue
+	except Exception:
+		pass
+	return ids
+
+
 # -------- pipeline principal --------
 
 
-async def run_scraper(date_start: str = "27/04/2025", date_end: Optional[str] = None, clear_output: bool = True) -> None:
+async def run_scraper(date_start: str = "27/04/2025", date_end: Optional[str] = None, clear_output: bool = False) -> None:
 	"""
 	1. GET la page de recherche
 	2. Remplit la date
@@ -344,11 +368,13 @@ async def run_scraper(date_start: str = "27/04/2025", date_end: Optional[str] = 
 
 		print(f"[INFO] Liens détail collectés (avec pagination): {len(detail_urls)}")
 
-		# Sortie: vider si demandé
-		if clear_output:
-			if OUTPUT_FILE.exists():
-				OUTPUT_FILE.unlink()
+		# Sortie: créer le fichier si nécessaire, suppression uniquement si demandé
+		if clear_output and OUTPUT_FILE.exists():
+			OUTPUT_FILE.unlink()
+		if not OUTPUT_FILE.exists():
 			OUTPUT_FILE.touch()
+		# Charger les IDs existants pour dédup inter-runs
+		seen_ids: Set[str] = load_existing_ids(OUTPUT_FILE)
 
 		# 7. Canonicalisation et dédup forte des liens par (refConsultation, orgAcronyme)
 		canonical_map: Dict[Tuple[str, str], str] = {}
@@ -359,11 +385,10 @@ async def run_scraper(date_start: str = "27/04/2025", date_end: Optional[str] = 
 			org = qs.get("orgAcronyme", [None])[0]
 			if ref and org:
 				canonical_map[(ref, org)] = urljoin(BASE_URL, f"/index.php?page=entreprise.EntrepriseDetailsConsultation&refConsultation={ref}&orgAcronyme={org}")
-		unique_detail_urls = list(canonical_map.values())
+		unique_detail_urls = list(canonical_map.values()) if canonical_map else detail_urls
 		print(f"[INFO] Liens détail uniques (après canon/dedup): {len(unique_detail_urls)}")
 
 		# 8. Pour chaque consultation trouvée (dédup sortie par id)
-		seen_ids: Set[str] = set()
 		for detail_url in unique_detail_urls:
 			detail_resp = await polite_get(client, detail_url)
 			data = parse_consultation_detail(detail_resp.text)
@@ -390,6 +415,9 @@ async def run_scraper(date_start: str = "27/04/2025", date_end: Optional[str] = 
 				data["scraped_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
 
+			# Attacher l'URL de détail canonique
+			data["url_detail"] = detail_url
+
 			# Sauvegarde JSONL (une ligne par consultation) – éviter doublons
 			if data["id"] not in seen_ids:
 				append_jsonl(OUTPUT_FILE, data)
@@ -400,31 +428,38 @@ async def run_scraper(date_start: str = "27/04/2025", date_end: Optional[str] = 
 
 
 def _parse_cli_args() -> Tuple[Optional[str], Optional[str], Optional[int]]:
-	"""Permet de passer ds, de (DD/MM/YYYY) ou year=YYYY."""
+	"""Permet de passer ds, de (DD/MM/YYYY), year=YYYY et overwrite=0/1."""
 	import sys
 	ds = None
 	de = None
 	year = None
+	overwrite = None
 	for a in sys.argv[1:]:
 		if a.startswith("year="):
 			try:
 				year = int(a.split("=", 1)[1])
 			except Exception:
 				year = None
+		elif a.startswith("overwrite="):
+			try:
+				overwrite = int(a.split("=", 1)[1])
+			except Exception:
+				overwrite = None
 		elif ds is None:
 			ds = a
 		elif de is None:
 			de = a
-	return ds, de, year
+	return ds, de, year if year else None, overwrite
 
 
-async def run_year(year: int) -> None:
+async def run_year(year: int, overwrite: bool = False) -> None:
 	"""Scrape l'année complète en mois consécutifs sans doublons."""
 	from calendar import monthrange
 	# Préparer sortie une fois
-	if OUTPUT_FILE.exists():
+	if overwrite and OUTPUT_FILE.exists():
 		OUTPUT_FILE.unlink()
-	OUTPUT_FILE.touch()
+	if not OUTPUT_FILE.exists():
+		OUTPUT_FILE.touch()
 	for month in range(1, 13):
 		days = monthrange(year, month)[1]
 		ds = f"01/{month:02d}/{year}"
@@ -434,11 +469,17 @@ async def run_year(year: int) -> None:
 
 
 if __name__ == "__main__":
-	ds, de, year = _parse_cli_args()
+	parsed = _parse_cli_args()
+	# Backward compatibility with previous tuple shape
+	if len(parsed) == 4:
+		ds, de, year, overwrite = parsed
+	else:
+		ds, de, year = parsed
+		overwrite = None
 	if year:
-		asyncio.run(run_year(year))
+		asyncio.run(run_year(year, overwrite=bool(overwrite) if overwrite is not None else False))
 	else:
 		if not ds:
 			ds = "27/04/2025"
-		asyncio.run(run_scraper(ds, de, clear_output=True))
+		asyncio.run(run_scraper(ds, de, clear_output=bool(overwrite) if overwrite is not None else False))
 
