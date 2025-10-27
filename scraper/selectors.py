@@ -77,7 +77,7 @@ class DetailConsultationSelectors:
 class PVSelectors:
     """Sélecteurs pour les procès-verbaux"""
     
-    TABLE = "table.pv-table"
+    TABLE = "table.pv-table, table.data-table, table"
     ROWS = "tbody tr"
     
     REF_CONSULTATION = "td:nth-child(1)"
@@ -85,7 +85,7 @@ class PVSelectors:
     TYPE_PV = "td:nth-child(3)"
     DATE_SEANCE = "td:nth-child(4)"
     DATE_PUBLICATION = "td:nth-child(5)"
-    PV_LINK = "a[href*='pv'], a.pv-link"
+    PV_LINK = "a[href*='pv'], a.pv-link, a[href*='telecharger'], a[href*='download']"
 
 
 class AttributionSelectors:

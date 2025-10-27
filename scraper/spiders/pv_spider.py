@@ -30,14 +30,30 @@ class PVSpider(scrapy.Spider):
         page = response.meta.get('playwright_page')
         
         try:
-            await page.wait_for_selector(PVSelectors.TABLE, timeout=10000)
+            try:
+                # Essayer la table prévue par les sélecteurs centraux
+                await page.wait_for_selector(PVSelectors.TABLE, timeout=45000)
+            except Exception:
+                # Fallback: toute table présente sur la page
+                try:
+                    await page.wait_for_load_state('networkidle', timeout=20000)
+                except Exception:
+                    pass
+                try:
+                    await page.wait_for_selector("table", timeout=30000)
+                except Exception:
+                    pass
             html = await page.content()
             await page.close()
             
             from scrapy.http import HtmlResponse
             response = HtmlResponse(url=response.url, body=html, encoding='utf-8')
             
-            rows = response.css(PVSelectors.ROWS)
+            # Chercher des lignes dans une table plausible
+            rows = response.css(f"{PVSelectors.TABLE} {PVSelectors.ROWS}")
+            if not rows:
+                # Fallback: première table avec tbody tr
+                rows = response.css("table tbody tr")
             self.logger.info(f"Trouvé {len(rows)} PV")
             
             for row in rows:
@@ -47,7 +63,11 @@ class PVSpider(scrapy.Spider):
                 item['type_pv'] = row.css(PVSelectors.TYPE_PV + '::text').get()
                 item['date_seance'] = self.parse_date(row.css(PVSelectors.DATE_SEANCE + '::text').get())
                 item['date_publication_pv'] = self.parse_date(row.css(PVSelectors.DATE_PUBLICATION + '::text').get())
-                item['url_pv'] = response.urljoin(row.css(PVSelectors.PV_LINK + '::attr(href)').get() or '')
+                href = row.css(PVSelectors.PV_LINK + '::attr(href)').get() or ''
+                # Éviter les liens javascript:
+                if href.startswith('javascript:'):
+                    href = ''
+                item['url_pv'] = response.urljoin(href) if href else ''
                 item['date_extraction'] = datetime.now()
                 item['page_html'] = html
                 

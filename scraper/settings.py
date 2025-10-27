@@ -54,24 +54,35 @@ PLAYWRIGHT_LAUNCH_OPTIONS = {
     "timeout": 30000,
 }
 
-PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT = 30000
+PLAYWRIGHT_DEFAULT_NAVIGATION_TIMEOUT = 45000
 
 # Contexts Playwright (pour gérer les sessions)
 PLAYWRIGHT_CONTEXTS = {
     "default": {
-        "viewport": {"width": 1920, "height": 1080},
+        "viewport": {"width": 1366, "height": 900},
         "user_agent": USER_AGENT,
+        "is_mobile": False,
+        "has_touch": False,
+        "locale": "fr-FR",
+        "extra_http_headers": {
+            "Accept-Language": "fr-FR,fr;q=0.9,en;q=0.8",
+            "Cache-Control": "no-cache",
+        },
         "ignore_https_errors": True,
     },
 }
 
 # Middlewares activés
+# Garder une configuration minimale et éviter les références à des modules inexistants
 DOWNLOADER_MIDDLEWARES = {
     'scrapy.downloadermiddlewares.useragent.UserAgentMiddleware': None,
     'scrapy.downloadermiddlewares.retry.RetryMiddleware': 90,
-    # 'scrapy_playwright.middleware.ScrapyPlaywrightMiddleware': 585,  # Non disponible dans la version 0.0.44
-    'scraper.middlewares.CustomUserAgentMiddleware': 400,
-    'scraper.middlewares.DelayMiddleware': 543,
+    # Scrapy-Playwright n'exige pas de middleware dédié; le download handler suffit
+    # 'scrapy_playwright.middleware.ScrapyPlaywrightMiddleware': 585,
+    # Middlewares custom (désactivés par défaut, activables selon besoin)
+    # 'scraper.middlewares.RetryWithDelayMiddleware': 560,
+    # 'scraper.middlewares.CustomUserAgentMiddleware': 400,
+    # 'scraper.middlewares.DelayMiddleware': 543,
 }
 
 SPIDER_MIDDLEWARES = {

@@ -3,11 +3,16 @@ Spider principal pour extraire les consultations du portail PMMP
 """
 import scrapy
 from scrapy_playwright.page import PageMethod
-from datetime import datetime
+from datetime import datetime, timedelta
 import logging
 import re
 from scraper.items import ConsultationItem, LotItem
 from scraper.selectors import ConsultationsSelectors, DetailConsultationSelectors, URLs
+from urllib.parse import urlsplit, urlunsplit
+try:
+    from zoneinfo import ZoneInfo
+except Exception:
+    ZoneInfo = None
 
 
 class ConsultationsSpider(scrapy.Spider):
@@ -77,6 +82,16 @@ class ConsultationsSpider(scrapy.Spider):
             
             rows = response.css(ConsultationsSelectors.ROWS)
             self.logger.info(f"Trouvé {len(rows)} consultations sur la page")
+            if len(rows) == 0:
+                try:
+                    import os
+                    os.makedirs('logs', exist_ok=True)
+                    path = f"logs/empty_consultations_{datetime.now().strftime('%Y%m%d_%H%M%S')}.html"
+                    with open(path, 'w', encoding='utf-8') as f:
+                        f.write(response.text)
+                    self.logger.warning(f"Aucun item extrait. HTML dumpé dans {path}")
+                except Exception as e:
+                    self.logger.error(f"Impossible de sauvegarder le dump HTML: {e}")
             
             for row in rows:
                 # Extraire les données de la ligne
