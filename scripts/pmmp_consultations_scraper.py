@@ -20,7 +20,7 @@ import hashlib
 import json
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple, Set, Dict
 
 import httpx
 from bs4 import BeautifulSoup
@@ -31,8 +31,9 @@ BASE_URL = "https://www.marchespublics.gov.ma"
 # Page de recherche (desktop)
 SEARCH_PATH = "/index.php?page=entreprise.EntrepriseAdvancedSearch&searchAnnCons&mobile=out"
 
-# Champs WebForms spécifiques vus sur la page de recherche
-DATE_FIELD_NAME = "ctl0$CONTENU_PAGE$AdvancedSearch$dateMiseEnLigneCalculeStart"
+# Champs WebForms spécifiques vus sur la page de recherche (début/fin)
+DATE_START_FIELD_NAME = "ctl0$CONTENU_PAGE$AdvancedSearch$dateMiseEnLigneCalculeStart"
+DATE_END_FIELD_NAME = "ctl0$CONTENU_PAGE$AdvancedSearch$dateMiseEnLigneCalculeEnd"
 SUBMIT_FIELD_NAME = "ctl0$CONTENU_PAGE$AdvancedSearch$lancerRecherche"
 SUBMIT_FIELD_VALUE = "Lancer la recherche"
 
@@ -109,6 +110,21 @@ def parse_consultation_links(list_html: str, base_url: str) -> list[str]:
 			seen.add(key)
 			deduped.append(u)
 	return deduped
+
+
+def find_next_page_url(list_html: str, base_url: str) -> Optional[str]:
+	"""Trouve l'URL de pagination (rel=next, texte 'Suivant'/'Next') si présente."""
+	soup = BeautifulSoup(list_html, "lxml")
+	# rel="next"
+	a = soup.find("a", attrs={"rel": "next"})
+	if a and a.get("href"):
+		return urljoin(base_url, a["href"])
+	# Texte "Suivant" / "Next"
+	for a in soup.find_all("a", href=True):
+		txt = (a.get_text(" ", strip=True) or "").lower()
+		if "suivant" in txt or "next" in txt:
+			return urljoin(base_url, a["href"])
+	return None
 
 
 def text_or_none(scope_soup: BeautifulSoup, css_selector: str) -> Optional[str]:
@@ -219,7 +235,7 @@ def append_jsonl(path: Path, record: dict) -> None:
 # -------- pipeline principal --------
 
 
-async def run_scraper(date_recherche: str = "27/04/2025") -> None:
+async def run_scraper(date_start: str = "27/04/2025", date_end: Optional[str] = None, clear_output: bool = True) -> None:
 	"""
 	1. GET la page de recherche
 	2. Remplit la date
@@ -258,8 +274,11 @@ async def run_scraper(date_recherche: str = "27/04/2025") -> None:
 		# 2. On récupère TOUS les champs (<input>) du form
 		payload = extract_hidden_fields(form)
 
-		# 3. On force notre date (plusieurs tentatives de nommage)
-		payload[DATE_FIELD_NAME] = date_recherche
+		# 3. On force nos dates (début et fin)
+		ds = date_start
+		de = date_end or date_start
+		payload[DATE_START_FIELD_NAME] = ds
+		payload[DATE_END_FIELD_NAME] = de
 		# Autres variantes possibles rencontrées
 		for key in list(payload.keys()):
 			lk = key.lower()
@@ -268,7 +287,13 @@ async def run_scraper(date_recherche: str = "27/04/2025") -> None:
 				and ("datemiseenligne" in lk or "datepublication" in lk)
 				and ("start" in lk or "debut" in lk or "du" in lk)
 			):
-				payload[key] = date_recherche
+				payload[key] = ds
+			if (
+				"advancedsearch" in lk
+				and ("datemiseenligne" in lk or "datepublication" in lk)
+				and ("end" in lk or "fin" in lk or "au" in lk)
+			):
+				payload[key] = de
 
 		# 4. Simuler le clic sur 'Lancer la recherche'
 		payload[SUBMIT_FIELD_NAME] = SUBMIT_FIELD_VALUE
@@ -290,30 +315,56 @@ async def run_scraper(date_recherche: str = "27/04/2025") -> None:
 			pass
 
 		# 6. Extraire tous les liens détail consultation à partir des <a><img></a>
-		detail_urls = parse_consultation_links(list_html, BASE_URL)
-
-		# Fallback: si aucun lien trouvé, charger la page des consultations en cours
-		if not detail_urls:
+		# et gérer la pagination. Si aucune entrée, fallback vers 'En cours'.
+		page_html = list_html
+		first_links = parse_consultation_links(page_html, BASE_URL)
+		if not first_links:
 			fallback_path = "/index.php?page=entreprise.EntrepriseAdvancedSearch&AllCons&EnCours&searchAnnCons&mobile=out"
 			print("[INFO] Aucun lien après POST. Fallback vers la liste 'En cours'...")
 			fb_resp = await polite_get(client, fallback_path)
-			fb_html = fb_resp.text
+			page_html = fb_resp.text
 			try:
 				logs = Path("logs"); logs.mkdir(exist_ok=True)
-				(logs / "consultations_list_fallback.html").write_text(fb_html, encoding="utf-8")
+				(logs / "consultations_list_fallback.html").write_text(page_html, encoding="utf-8")
 			except Exception:
 				pass
-			detail_urls = parse_consultation_links(fb_html, BASE_URL)
 
-		print(f"[INFO] Liens détail trouvés: {len(detail_urls)}")
+		detail_urls: list[str] = []
+		while True:
+			page_links = parse_consultation_links(page_html, BASE_URL)
+			detail_urls.extend(page_links)
+			next_url = find_next_page_url(page_html, BASE_URL)
+			if not next_url:
+				break
+			try:
+				resp = await polite_get(client, next_url)
+				page_html = resp.text
+			except Exception:
+				break
 
-		# (Optionnel) vider le fichier de sortie si tu veux fresh run
-		if OUTPUT_FILE.exists():
-			OUTPUT_FILE.unlink()
-		OUTPUT_FILE.touch()
+		print(f"[INFO] Liens détail collectés (avec pagination): {len(detail_urls)}")
 
-		# 7. Pour chaque consultation trouvée
-		for detail_url in detail_urls:
+		# Sortie: vider si demandé
+		if clear_output:
+			if OUTPUT_FILE.exists():
+				OUTPUT_FILE.unlink()
+			OUTPUT_FILE.touch()
+
+		# 7. Canonicalisation et dédup forte des liens par (refConsultation, orgAcronyme)
+		canonical_map: Dict[Tuple[str, str], str] = {}
+		for u in detail_urls:
+			p = urlparse(u)
+			qs = parse_qs(p.query)
+			ref = qs.get("refConsultation", [None])[0]
+			org = qs.get("orgAcronyme", [None])[0]
+			if ref and org:
+				canonical_map[(ref, org)] = urljoin(BASE_URL, f"/index.php?page=entreprise.EntrepriseDetailsConsultation&refConsultation={ref}&orgAcronyme={org}")
+		unique_detail_urls = list(canonical_map.values())
+		print(f"[INFO] Liens détail uniques (après canon/dedup): {len(unique_detail_urls)}")
+
+		# 8. Pour chaque consultation trouvée (dédup sortie par id)
+		seen_ids: Set[str] = set()
+		for detail_url in unique_detail_urls:
 			detail_resp = await polite_get(client, detail_url)
 			data = parse_consultation_detail(detail_resp.text)
 
@@ -338,24 +389,56 @@ async def run_scraper(date_recherche: str = "27/04/2025") -> None:
 				# Fallback pour versions Python anciennes
 				data["scraped_at"] = datetime.utcnow().isoformat(timespec="seconds") + "Z"
 
-			# Sauvegarde JSONL (une ligne par consultation)
-			append_jsonl(OUTPUT_FILE, data)
 
-			# Affichage debug console
-			print(f"[OK] {data.get('ref')} ({data.get('id')})")
+			# Sauvegarde JSONL (une ligne par consultation) – éviter doublons
+			if data["id"] not in seen_ids:
+				append_jsonl(OUTPUT_FILE, data)
+				seen_ids.add(data["id"])
+				print(f"[OK] {data.get('ref')} ({data.get('id')})")
+			else:
+				print(f"[SKIP DUP] {data.get('ref')} ({data.get('id')})")
 
 
-def _parse_cli_date_arg() -> Optional[str]:
-	"""Permet de passer une date en argument simple (DD/MM/YYYY)."""
+def _parse_cli_args() -> Tuple[Optional[str], Optional[str], Optional[int]]:
+	"""Permet de passer ds, de (DD/MM/YYYY) ou year=YYYY."""
 	import sys
+	ds = None
+	de = None
+	year = None
+	for a in sys.argv[1:]:
+		if a.startswith("year="):
+			try:
+				year = int(a.split("=", 1)[1])
+			except Exception:
+				year = None
+		elif ds is None:
+			ds = a
+		elif de is None:
+			de = a
+	return ds, de, year
 
-	if len(sys.argv) >= 2:
-		return sys.argv[1]
-	return None
+
+async def run_year(year: int) -> None:
+	"""Scrape l'année complète en mois consécutifs sans doublons."""
+	from calendar import monthrange
+	# Préparer sortie une fois
+	if OUTPUT_FILE.exists():
+		OUTPUT_FILE.unlink()
+	OUTPUT_FILE.touch()
+	for month in range(1, 13):
+		days = monthrange(year, month)[1]
+		ds = f"01/{month:02d}/{year}"
+		de = f"{days:02d}/{month:02d}/{year}"
+		print(f"\n[MONTH] {ds} -> {de}")
+		await run_scraper(ds, de, clear_output=False)
 
 
 if __name__ == "__main__":
-	# Date par défaut ou via arg CLI
-	arg_date = _parse_cli_date_arg() or "27/04/2025"
-	asyncio.run(run_scraper(arg_date))
+	ds, de, year = _parse_cli_args()
+	if year:
+		asyncio.run(run_year(year))
+	else:
+		if not ds:
+			ds = "27/04/2025"
+		asyncio.run(run_scraper(ds, de, clear_output=True))
 
